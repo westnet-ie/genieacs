@@ -1,40 +1,38 @@
 import Path from "./path.ts";
 
+function lowBits(n: number): number {
+  return n <= 0 ? 0 : -1 >>> (32 - n);
+}
+
 export default class PathSet {
-  private declare lengthIndex: Set<Path>[];
-  private declare fragmentIndex: Map<string, Set<Path>>[];
-  private declare stringIndex: Map<string, Path>;
+  private paramSegmentIndex: Map<string, Set<Path>>[] = [];
+  private attrSegmentIndex: Map<string, Set<Path>>[] = [];
+  private stringIndex: Map<string, Path> = new Map();
 
-  public constructor() {
-    this.lengthIndex = [];
-    this.fragmentIndex = [];
-    this.stringIndex = new Map();
-  }
+  public constructor() {}
 
-  public get depth(): number {
-    return this.lengthIndex.length;
-  }
-
-  public add(path: Path): Path {
+  public add(pathStr: string): Path {
+    let path = this.get(pathStr);
+    if (path) return path;
+    path = Path.parse(pathStr);
     if (path.alias) throw new Error("PathSet does not support aliased paths");
-    const p = this.get(path);
-
-    if (p) return p;
+    if (!path.paramLength)
+      throw new Error("PathSet does not support attribute-only paths");
 
     this.stringIndex.set(path.toString(), path);
 
-    while (this.lengthIndex.length <= path.length) {
-      this.lengthIndex.push(new Set());
-      // fragmentIndex is one less than lengthIndex
-      if (this.lengthIndex.length > 1) this.fragmentIndex.push(new Map());
-    }
+    while (this.paramSegmentIndex.length < path.paramLength)
+      this.paramSegmentIndex.push(new Map());
 
-    const lengthIndex = this.lengthIndex[path.length];
-    lengthIndex.add(path);
+    while (this.attrSegmentIndex.length < path.attrLength)
+      this.attrSegmentIndex.push(new Map());
 
     for (let i = 0; i < path.length; ++i) {
       const fragment = path.segments[i] as string;
-      const fragmentIndex = this.fragmentIndex[i];
+      const fragmentIndex =
+        i < path.paramLength
+          ? this.paramSegmentIndex[i]
+          : this.attrSegmentIndex[i - path.paramLength];
 
       let fragmentIndexSet = fragmentIndex.get(fragment);
       if (!fragmentIndexSet) {
@@ -48,63 +46,78 @@ export default class PathSet {
     return path;
   }
 
-  public get(path: Path): Path {
-    return this.stringIndex.get(path.toString()) || null;
+  public get(path: string): Path | undefined {
+    return this.stringIndex.get(path);
+  }
+
+  // findCompat() does not support attribute paths
+  public findCompat(
+    path: Path,
+    superset = false,
+    subset = false,
+    depth = path.paramLength,
+  ): Path[] {
+    if (path.attrLength) return [];
+
+    const segmentMask = lowBits(path.paramLength);
+
+    let laxity = 0;
+    if (superset) laxity |= ~path.wildcard & segmentMask;
+    if (subset) laxity |= path.wildcard;
+
+    const lo = Math.max(1, path.paramLength);
+    const hi = Math.min(32, depth);
+    const paramMask = lowBits(hi - lo + 1) << (lo - 1);
+
+    return this.find(path, laxity, paramMask);
   }
 
   public find(
     path: Path,
-    superset = false,
-    subset = false,
-    depth: number = path.length,
+    laxity: number, // bit i: pattern segment i matches by wildcard as well
+    paramMask = -1, // bit i admits candidates with param length i + 1
+    attrMask = 1, // bit i admits candidates with attr length i
   ): Path[] {
     if (path.alias) throw new Error("PathSet does not support aliased paths");
+    if (path.paramLength > this.paramSegmentIndex.length) return [];
+    if (path.attrLength > this.attrSegmentIndex.length) return [];
 
-    const len = path.length;
+    const emptySet: Set<Path> = new Set();
 
-    if (!superset && depth === len && (!subset || !path.wildcard)) {
-      const p = this.get(path);
-      return p ? [p] : [];
+    const indexes: [Set<Path>, Set<Path>][] = [];
+
+    for (const [i, s] of path.segments.entries()) {
+      const b = 1 << i;
+      const m = laxity & b;
+      const w = b & path.wildcard;
+      if (w && m) continue;
+      const idxSet =
+        i < path.paramLength
+          ? this.paramSegmentIndex[i]
+          : this.attrSegmentIndex[i - path.paramLength];
+      const idx1 = idxSet.get(s as string) || emptySet;
+      let idx2 = emptySet;
+      if (m) idx2 = idxSet.get("*") || emptySet;
+      indexes.push([idx1, idx2]);
     }
 
-    const lengthIndex = this.lengthIndex.slice(len, depth + 1);
-    if (!lengthIndex.length) return [];
+    indexes.sort((a, b) => a[0].size + a[1].size - (b[0].size + b[1].size));
 
-    let res;
-    for (let i = len - 1; i >= 0; --i) {
-      let fragmentIndexSet2;
-      const fragmentIndex = this.fragmentIndex[i];
+    let res: Path[];
 
-      if ((path.wildcard >> i) & 1) {
-        if (subset) continue;
-      } else if (superset) {
-        fragmentIndexSet2 = fragmentIndex.get("*");
-      }
+    if (!indexes.length) res = [...this.stringIndex.values()];
+    else res = [...indexes[0][0], ...indexes[0][1]];
 
-      const fragment = path.segments[i] as string;
-      const fragmentIndexSet1 = fragmentIndex.get(fragment);
+    res = res.filter(
+      (p) =>
+        (1 << (p.paramLength - 1)) & paramMask &&
+        (1 << p.attrLength) & attrMask,
+    );
 
-      if (!fragmentIndexSet1) {
-        if (!fragmentIndexSet2) return [];
-        if (!res) res = [...fragmentIndexSet2];
-        else res = res.filter((r) => fragmentIndexSet2.has(r));
-      } else if (!fragmentIndexSet2) {
-        if (!res) res = [...fragmentIndexSet1];
-        else res = res.filter((r) => fragmentIndexSet1.has(r));
-      } else {
-        if (!res) {
-          res = [...fragmentIndexSet1, ...fragmentIndexSet2];
-        } else {
-          res = res.filter(
-            (r) => fragmentIndexSet1.has(r) || fragmentIndexSet2.has(r),
-          );
-        }
-      }
-      if (!res.length) return res;
+    for (let i = 1; i < indexes.length; ++i) {
+      const [idx1, idx2] = indexes[i];
+      res = res.filter((p) => idx1.has(p) || idx2.has(p));
     }
-
-    if (!res) res = [].concat(...lengthIndex.map((a) => [...a]));
-    else res = res.filter((r) => lengthIndex.some((a) => a.has(r)));
 
     return res;
   }

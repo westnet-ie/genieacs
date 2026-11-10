@@ -26,6 +26,12 @@ EXT_TIMEOUT
 
   Default: ``3000``
 
+SCRIPT_TIMEOUT
+  Timeout (in milliseconds) for executing provision and virtual parameter
+  scripts. Values below 50 are clamped to 50.
+
+  Default: ``100``
+
 DEBUG_FILE
   File to dump CPE debug log.
 
@@ -94,6 +100,13 @@ CWMP_COMPACT_DEVICE_ID
 
   Default: ``false``
 
+CWMP_MAX_BODY_SIZE
+  Maximum size of a CWMP request body in bytes, counted after decompression.
+  The connection of a request exceeding this limit is closed without a
+  response.
+
+  Default: ``4194304``
+
 NBI_WORKER_PROCESSES
   The number of worker processes to spawn for genieacs-nbi. A value of 0 means
   as many as there are CPU cores available.
@@ -106,9 +119,14 @@ NBI_PORT
   Default: ``7557``
 
 NBI_INTERFACE
-  The network interface that genieacs-nbi binds to.
+  The network interface that genieacs-nbi binds to. The NBI is
+  unauthenticated by design and must not be reachable from untrusted
+  networks; it binds to the loopback interface by default. Set this to
+  ``::`` (or another address) only when access from other hosts is
+  required and protected, for example by a reverse proxy adding
+  authentication.
 
-  Default: ``::``
+  Default: ``127.0.0.1``
 
 NBI_SSL_CERT
   Path to certificate file. If omitted, non-secure HTTP will be used.

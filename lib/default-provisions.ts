@@ -2,13 +2,14 @@ import Path from "./common/path.ts";
 import * as config from "./config.ts";
 import * as device from "./device.ts";
 import * as scheduling from "./scheduling.ts";
+import { Value } from "./common/expression.ts";
 import { SessionContext, Declaration } from "./types.ts";
 
-const MAX_DEPTH = +config.get("MAX_DEPTH");
+const MAX_DEPTH = Number(config.get("MAX_DEPTH"));
 
 export function refresh(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (
@@ -27,8 +28,8 @@ export function refresh(
   const offset = scheduling.variance(sessionContext.deviceId, every);
   const t = scheduling.interval(sessionContext.timestamp, every, offset);
 
-  let attrGet;
-  let refreshChildren;
+  let attrGet: Record<string, number>;
+  let refreshChildren: boolean;
   if (provision[3] == null) {
     refreshChildren = true;
     attrGet = { object: 1, writable: 1, value: t };
@@ -38,23 +39,22 @@ export function refresh(
     for (const a of provision.slice(4)) attrGet[a as string] = t;
   }
 
-  let path = Path.parse(provision[1]);
-  let l = path.length;
+  // The documented "refresh all device parameters" passes an empty objectName
+  let path = provision[1] ? Path.parse(provision[1]) : Path.root;
+  const l = path.length;
+
   if (refreshChildren) {
-    const segments = path.segments.slice();
-    l = segments.length;
-    segments.length = MAX_DEPTH;
-    segments.fill("*", l);
-    path = Path.parse(segments.join("."));
+    const wildcard = Path.parse("*");
+    while (path.length < MAX_DEPTH) path = path.concat(wildcard);
   }
 
-  for (let i = l; i <= path.length; ++i) {
+  for (let i = Math.max(l, 1); i <= path.length; ++i) {
     declarations.push({
       path: path.slice(0, i),
       pathGet: t,
-      pathSet: null,
+      pathSet: undefined,
       attrGet: attrGet,
-      attrSet: null,
+      attrSet: undefined,
       defer: true,
     });
   }
@@ -64,7 +64,7 @@ export function refresh(
 
 export function value(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (
@@ -85,7 +85,7 @@ export function value(
   }
 
   if (attr === "accessList") {
-    val = (val || "")
+    val = String(val || "")
       .split(",")
       .map((s) => s.trim())
       .filter((s) => !!s);
@@ -96,7 +96,7 @@ export function value(
   declarations.push({
     path: Path.parse(provision[1]),
     pathGet: 1,
-    pathSet: null,
+    pathSet: undefined,
     attrGet: { [attr]: 1 },
     attrSet: { [attr]: val },
     defer: true,
@@ -107,7 +107,7 @@ export function value(
 
 export function tag(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (
@@ -120,7 +120,7 @@ export function tag(
   declarations.push({
     path: Path.parse(`Tags.${provision[1]}`),
     pathGet: 1,
-    pathSet: null,
+    pathSet: undefined,
     attrGet: { value: 1 },
     attrSet: { value: [provision[2]] },
     defer: true,
@@ -131,7 +131,7 @@ export function tag(
 
 export function reboot(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (provision.length !== 1) throw new Error("Invalid arguments");
@@ -139,7 +139,7 @@ export function reboot(
   declarations.push({
     path: Path.parse("Reboot"),
     pathGet: 1,
-    pathSet: null,
+    pathSet: undefined,
     attrGet: { value: 1 },
     attrSet: { value: [sessionContext.timestamp] },
     defer: true,
@@ -150,7 +150,7 @@ export function reboot(
 
 export function reset(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (provision.length !== 1) throw new Error("Invalid arguments");
@@ -158,7 +158,7 @@ export function reset(
   declarations.push({
     path: Path.parse("FactoryReset"),
     pathGet: 1,
-    pathSet: null,
+    pathSet: undefined,
     attrGet: { value: 1 },
     attrSet: { value: [sessionContext.timestamp] },
     defer: true,
@@ -169,7 +169,7 @@ export function reset(
 
 export function download(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
 ): boolean {
   if (
@@ -193,15 +193,55 @@ export function download(
     path: Path.parse(`Downloads.[${alias}]`),
     pathGet: 1,
     pathSet: 1,
-    attrGet: null,
-    attrSet: null,
+    attrGet: undefined,
+    attrSet: undefined,
     defer: true,
   });
 
   declarations.push({
     path: Path.parse(`Downloads.[${alias}].Download`),
     pathGet: 1,
-    pathSet: null,
+    pathSet: undefined,
+    attrGet: { value: 1 },
+    attrSet: { value: [sessionContext.timestamp] },
+    defer: true,
+  });
+
+  return true;
+}
+
+export function upload(
+  sessionContext: SessionContext,
+  provision: [string, ...Value[]],
+  declarations: Declaration[],
+): boolean {
+  if (
+    provision.length !== 3 ||
+    typeof provision[1] !== "string" ||
+    !provision[1].length ||
+    typeof provision[2] !== "string" ||
+    !provision[2].length
+  )
+    throw new Error("Invalid arguments");
+
+  const alias = [
+    `FileType:${JSON.stringify(provision[1] || "")}`,
+    `FileName:${JSON.stringify(provision[2] || "")}`,
+  ].join(",");
+
+  declarations.push({
+    path: Path.parse(`Uploads.[${alias}]`),
+    pathGet: 1,
+    pathSet: 1,
+    attrGet: undefined,
+    attrSet: undefined,
+    defer: true,
+  });
+
+  declarations.push({
+    path: Path.parse(`Uploads.[${alias}].Upload`),
+    pathGet: 1,
+    pathSet: undefined,
     attrGet: { value: 1 },
     attrSet: { value: [sessionContext.timestamp] },
     defer: true,
@@ -212,7 +252,7 @@ export function download(
 
 export function instances(
   sessionContext: SessionContext,
-  provision: (string | number | boolean)[],
+  provision: [string, ...Value[]],
   declarations: Declaration[],
   startRevision: number,
   endRevision: number,
@@ -226,13 +266,14 @@ export function instances(
 
   const path = Path.parse(provision[1]);
 
-  if (provision[2][0] === "+" || provision[2][0] === "-") {
+  const sign = String(provision[2])[0];
+  if (sign === "+" || sign === "-") {
     declarations.push({
       path: path,
       pathGet: 1,
-      pathSet: null,
-      attrGet: null,
-      attrSet: null,
+      pathSet: undefined,
+      attrGet: undefined,
+      attrSet: undefined,
       defer: true,
     });
 
@@ -250,8 +291,8 @@ export function instances(
     path: path,
     pathGet: 1,
     pathSet: count,
-    attrGet: null,
-    attrSet: null,
+    attrGet: undefined,
+    attrSet: undefined,
     defer: true,
   });
 
